@@ -1,8 +1,9 @@
 import json
 import math
+import os
 from typing import List, Annotated
 
-from fastapi import FastAPI, Depends, HTTPException, status, Response
+from fastapi import FastAPI, Depends, HTTPException, status, Response, UploadFile
 from fastapi.security import OAuth2PasswordBearer
 from google.auth.transport import requests
 from google.oauth2 import id_token
@@ -51,26 +52,30 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    return username
+    return payload
 
 
 @app.post("/token")
 async def login_for_access_token(token: Token, response: Response):
     try:
         idinfo = id_token.verify_oauth2_token(token.id_token, requests.Request(), GOOGLE_CLIENT_ID)
-        user_id = idinfo["sub"]
 
-        # Issue an authentication cookie
-        token = jwt.encode({"user_id": user_id}, SECRET_KEY, algorithm=ALGORITHM)
+        user_details = {
+            "user_id": idinfo["sub"],
+            "email": idinfo["email"],
+            "name": idinfo["given_name"],
+            "picture": idinfo["picture"]
+        }
+        token = jwt.encode(user_details, SECRET_KEY, algorithm=ALGORITHM)
         return {"status": "success", "token": token}
     except ValueError as error:
         # Invalid ID token
         return {"status": "error", "message": str(error)}
 
 
-file = open("matches.json")
+local_file = open("matches.json")
 
-all_events = Events(json.load(file))
+all_events = Events(json.load(local_file))
 
 base_info = BaseInfo()
 all_matches = []
@@ -123,18 +128,41 @@ print("Matches per day: {}".format(per_day(all_matches)))
 print("Matches where they liked me: {}".format(len(matches_they_liked)))
 print("Matches where I liked them: {}".format(len(matches_i_liked)))
 
+GetUserDep = Annotated[dict, Depends(get_current_user)]
+
+
+@app.post("api/v1/upload")
+async def create_upload_file(file: UploadFile, user_data: GetUserDep):
+    path = './uploads'
+
+    # check whether directory already exists
+    if not os.path.exists(path):
+        os.mkdir(path)
+        print("Folder %s created!" % path)
+    else:
+        print("Folder %s already exists" % path)
+
+    file_dir_name = "{}/{}".format(path, file.filename)
+    f = open(file_dir_name, "wb")
+    content = await file.read(file.size)
+    f.write(content)
+    f.close()
+    return {
+        "file_size": file.size,
+        "file_name": file.filename
+    }
+
 
 @app.get("/api/v1/matches")
-async def read_matches(user_data=Depends(get_current_user)):
+async def read_matches(user_data: GetUserDep):
     return all_matches
 
 
 @app.get("/api/v1/likes")
-async def read_likes(user_data=Depends(get_current_user)):
+async def read_likes(user_data: GetUserDep):
     return all_likes
 
 
 @app.get("/api/v1/base")
-async def read_base(user_data=Depends(get_current_user)):
-    base_info.user_id = user_data
-    return base_info
+async def read_base(user_data: GetUserDep):
+    return user_data

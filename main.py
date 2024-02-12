@@ -30,8 +30,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:3000', 'http://127.0.0.1:3000',
-                   'https://localhost:3000', 'https://127.0.0.1:3000'],
+    allow_origins=['http://localhost:5173', 'http://127.0.0.1:5173',
+                   'https://localhost:5173', 'https://127.0.0.1:5173'],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -131,7 +131,7 @@ print("Matches where I liked them: {}".format(len(matches_i_liked)))
 GetUserDep = Annotated[dict, Depends(get_current_user)]
 
 
-@app.post("api/v1/upload")
+@app.post("/api/v1/upload")
 async def create_upload_file(file: UploadFile, user_data: GetUserDep):
     path = './uploads'
 

@@ -1,3 +1,4 @@
+from datetime import datetime
 import json
 import math
 import os
@@ -10,14 +11,28 @@ from google.oauth2 import id_token
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from sqlmodel import Session
 from starlette.middleware.cors import CORSMiddleware
 
-from models.models import Events, Like, Match, BaseInfo, Chats
+from db.session import create_db_and_tables, get_session
+
+from models.models import Events, Like, Match, BaseInfo, Chats, Matches
 
 GOOGLE_CLIENT_ID = "551511732871-ktjlpdoukaemppa8ph2p12uofk23urs3.apps.googleusercontent.com"
 
 SECRET_KEY = "05344ffa81ac1adad640701221700b92a48f43a7984b4d40f97ca64a29021c14"
 ALGORITHM = "HS256"
+
+local_file = open("matches-dawd.json")
+
+all_events = Events(json.load(local_file))
+
+base_info = BaseInfo()
+all_matches = []
+matches_i_liked = []
+matches_they_liked = []
+all_likes = []
+all_chats = []
 
 
 class Token(BaseModel):
@@ -55,37 +70,23 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     return payload
 
 
-@app.post("/token")
-async def login_for_access_token(token: Token, response: Response):
-    try:
-        idinfo = id_token.verify_oauth2_token(token.id_token, requests.Request(), GOOGLE_CLIENT_ID)
+def save_hinge_data(events: Events, user_id: int, session: Session):
+    timestamp_format = "%Y-%m-%dT%H:%M:%S.%f"
+    for evt in events.root:
+        if evt.get('match') and evt.get("like"):
+            # I liked them and got a match
+            event_timestamp = datetime.strptime(evt.get("match")[0]["timestamp"], timestamp_format)
+            db_match = Matches(user_id=user_id, type=1, timestamp=event_timestamp)
+            session.add(db_match)
+        elif evt.get('match'):
+            event_timestamp = datetime.strptime(evt.get("match")[0]["timestamp"], timestamp_format)
+            db_match = Matches(user_id=user_id, type=2, timestamp=event_timestamp)
+            session.add(db_match)
 
-        user_details = {
-            "user_id": idinfo["sub"],
-            "email": idinfo["email"],
-            "name": idinfo["given_name"],
-            "picture": idinfo["picture"]
-        }
-        token = jwt.encode(user_details, SECRET_KEY, algorithm=ALGORITHM)
-        return {"status": "success", "token": token}
-    except ValueError as error:
-        # Invalid ID token
-        return {"status": "error", "message": str(error)}
+    session.commit()
 
-
-local_file = open("matches.json")
-
-all_events = Events(json.load(local_file))
-
-base_info = BaseInfo()
-all_matches = []
-matches_i_liked = []
-matches_they_liked = []
-all_likes = []
-all_chats = []
 
 for event in all_events.root:
-
     if event.get('match') and event.get("like"):
         # I liked them and got a match
         matches_i_liked.append(event)
@@ -131,8 +132,31 @@ print("Matches where I liked them: {}".format(len(matches_i_liked)))
 GetUserDep = Annotated[dict, Depends(get_current_user)]
 
 
+@app.on_event("startup")
+def on_startup(session: Session = Depends(get_session)):
+    create_db_and_tables()
+
+
+@app.post("/token")
+async def login_for_access_token(token: Token, response: Response):
+    try:
+        idinfo = id_token.verify_oauth2_token(token.id_token, requests.Request(), GOOGLE_CLIENT_ID)
+
+        user_details = {
+            "user_id": idinfo["sub"],
+            "email": idinfo["email"],
+            "name": idinfo["given_name"],
+            "picture": idinfo["picture"]
+        }
+        token = jwt.encode(user_details, SECRET_KEY, algorithm=ALGORITHM)
+        return {"status": "success", "token": token}
+    except ValueError as error:
+        # Invalid ID token
+        return {"status": "error", "message": str(error)}
+
+
 @app.post("/api/v1/upload")
-async def create_upload_file(file: UploadFile, user_data: GetUserDep):
+async def create_upload_file(file: UploadFile, user_data: GetUserDep, session: Session = Depends(get_session)):
     path = './uploads'
 
     # check whether directory already exists
@@ -147,6 +171,9 @@ async def create_upload_file(file: UploadFile, user_data: GetUserDep):
     content = await file.read(file.size)
     f.write(content)
     f.close()
+
+    events = Events(json.load(open(file_dir_name)))
+    save_hinge_data(events, user_data.get("user_id"), session)
     return {
         "file_size": file.size,
         "file_name": file.filename

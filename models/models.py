@@ -1,7 +1,9 @@
 from enum import Enum
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import RootModel, BaseModel
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+from datetime import datetime
 
 
 class MatchType(Enum):
@@ -9,6 +11,13 @@ class MatchType(Enum):
     MATCH = "match"
     CHATS = "chats"
     BLOCK = "block"
+
+
+class Matches(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    type: int = Field(index=True)
+    timestamp: datetime
 
 
 class Events(RootModel):

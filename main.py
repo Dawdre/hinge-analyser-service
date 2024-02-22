@@ -1,9 +1,9 @@
-from datetime import datetime
 import json
 import math
 import os
 from typing import List, Annotated
 
+import dateparser
 from fastapi import FastAPI, Depends, HTTPException, status, Response, UploadFile
 from fastapi.security import OAuth2PasswordBearer
 from google.auth.transport import requests
@@ -11,19 +11,18 @@ from google.oauth2 import id_token
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 from starlette.middleware.cors import CORSMiddleware
 
 from db.session import create_db_and_tables, get_session
-
-from models.models import Events, Like, Match, BaseInfo, Chats, Matches
+from models.models import Events, Like, BaseInfo, Matches, Likes
 
 GOOGLE_CLIENT_ID = "551511732871-ktjlpdoukaemppa8ph2p12uofk23urs3.apps.googleusercontent.com"
 
 SECRET_KEY = "05344ffa81ac1adad640701221700b92a48f43a7984b4d40f97ca64a29021c14"
 ALGORITHM = "HS256"
 
-local_file = open("matches-dawd.json")
+local_file = open("matches-dawd2.json")
 
 all_events = Events(json.load(local_file))
 
@@ -70,46 +69,60 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     return payload
 
 
-def save_hinge_data(events: Events, user_id: int, session: Session):
-    timestamp_format = "%Y-%m-%dT%H:%M:%S.%f"
+def get_like_content(content: List):
+    like_stuff = json.loads(content[0]["content"])[0]
+
+    if like_stuff.get("photo") and like_stuff.get("photo").get("url"):
+        return 1
+    elif like_stuff.get("prompt") and like_stuff.get("prompt").get("question"):
+        return 2
+    elif like_stuff.get("video") and like_stuff.get("video").get("url"):
+        return 3
+
+    return 0
+
+
+def save_hinge_data(events: Events, user_id: str, session: Session):
+    timestamp_format = "%Y-%m-%d %H:%M:%S.%f"
     for evt in events.root:
         if evt.get('match') and evt.get("like"):
             # I liked them and got a match
-            event_timestamp = datetime.strptime(evt.get("match")[0]["timestamp"], timestamp_format)
+            event_timestamp = dateparser.parse(evt.get("match")[0]["timestamp"])
             db_match = Matches(user_id=user_id, type=1, timestamp=event_timestamp)
             session.add(db_match)
         elif evt.get('match'):
-            event_timestamp = datetime.strptime(evt.get("match")[0]["timestamp"], timestamp_format)
+            event_timestamp = dateparser.parse(evt.get("match")[0]["timestamp"])
             db_match = Matches(user_id=user_id, type=2, timestamp=event_timestamp)
             session.add(db_match)
+        elif evt.get("like"):
+            event_timestamp = dateparser.parse(evt.get("like")[0]["timestamp"])
+            db_like = Likes(user_id=user_id, type=get_like_content(evt.get("like")), timestamp=event_timestamp)
+            session.add(db_like)
 
     session.commit()
 
 
 for event in all_events.root:
+    # match = Match(**event.get('match')[0])
+    # all_matches.append(match)
+    # base_info.match_count = len(all_matches)
     if event.get('match') and event.get("like"):
         # I liked them and got a match
         matches_i_liked.append(event)
     elif event.get('match'):
         # They liked me and matched
-        # if not event.get('chats'):
-        #     print(event)
         matches_they_liked.append(event)
+    elif event.get("like"):
+        like = Like(**event.get("like")[0])
+        all_likes.append(like)
+        base_info.like_count = len(all_likes)
 
-    for key, item in event.items():
-        if key == "match":
-            match = Match(**item[0])
-            all_matches.append(match)
-            base_info.match_count = len(all_matches)
-        elif key == "like":
-            like = Like(**item[0])
-            all_likes.append(item)
-            base_info.like_count = len(all_likes)
-        elif key == "chats":
-            chats = [Chats(**x) for x in item]
-            if len(chats) > 1:
-                all_chats.append(chats)
-            base_info.total_chat_count = len(all_chats)
+    # for key, item in event.items():
+    #     if key == "chats":
+    #         chats = [Chats(**x) for x in item]
+    #         if len(chats) > 1:
+    #             all_chats.append(chats)
+    #         base_info.total_chat_count = len(all_chats)
 
 
 def per_day(data: List):
@@ -173,21 +186,29 @@ async def create_upload_file(file: UploadFile, user_data: GetUserDep, session: S
     f.close()
 
     events = Events(json.load(open(file_dir_name)))
-    save_hinge_data(events, user_data.get("user_id"), session)
+    save_hinge_data(events, user_data.get("email"), session)
     return {
         "file_size": file.size,
         "file_name": file.filename
     }
 
 
-@app.get("/api/v1/matches")
-async def read_matches(user_data: GetUserDep):
-    return all_matches
+@app.get("/api/v1/matches", response_model=List[Matches])
+async def read_matches(user_data: GetUserDep, session: Session = Depends(get_session)):
+    statement = select(Matches).where(Matches.user_id == user_data.get("email"))
+    matches = session.exec(statement)
+    if not matches:
+        raise HTTPException(status_code=404, detail="Match not found")
+    return matches
 
 
-@app.get("/api/v1/likes")
-async def read_likes(user_data: GetUserDep):
-    return all_likes
+@app.get("/api/v1/likes", response_model=List[Likes])
+async def read_likes(user_data: GetUserDep, session: Session = Depends(get_session)):
+    statement = select(Likes).where(Likes.user_id == user_data.get("email"))
+    likes = session.exec(statement)
+    if not likes:
+        raise HTTPException(status_code=404, detail="Likes not found for that user")
+    return likes
 
 
 @app.get("/api/v1/base")

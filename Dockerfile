@@ -5,4 +5,4 @@ COPY requirements.txt /hinge-analyser-service/requirements.txt
 RUN pip install --no-cache-dir -r /hinge-analyser-service/requirements.txt
 
 COPY . /hinge-analyser-service/
-CMD ["uvicorn", "main:app", "--reload"]
+CMD ["uvicorn", "main:app", "--proxy-headers", "--host", "0.0.0.0", "--port", "8000"]

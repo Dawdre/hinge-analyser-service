@@ -3,7 +3,6 @@ version: "3.9"
 services:
   backend:
     build: ./
-    hostname: hinge-analyser-service
     container_name: hinge-analyser-service
     depends_on:
       - db

@@ -15,7 +15,14 @@ class MatchType(Enum):
 
 class Matches(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
-    user_id: int = Field(index=True)
+    user_id: str = Field(index=True)
+    type: int = Field(index=True)
+    timestamp: datetime
+
+
+class Likes(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
     type: int = Field(index=True)
     timestamp: datetime
 

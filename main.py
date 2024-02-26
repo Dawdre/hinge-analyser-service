@@ -1,29 +1,26 @@
 import json
 import math
 import os
+from pathlib import Path
 from typing import List, Annotated
 
-import dateparser
+from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, Response, UploadFile
 from fastapi.security import OAuth2PasswordBearer
 from google.auth.transport import requests
 from google.oauth2 import id_token
 from jose import jwt, JWTError
-from passlib.context import CryptContext
-from pydantic import BaseModel
 from sqlmodel import Session, select
 from starlette.middleware.cors import CORSMiddleware
 
 from db.session import create_db_and_tables, get_session
-from models.models import Events, Like, BaseInfo, Matches, Likes
+from models.models import Events, Like, BaseInfo, Matches, Likes, Token
+from utils.dates import parse_timestamp
 
-GOOGLE_CLIENT_ID = "551511732871-ktjlpdoukaemppa8ph2p12uofk23urs3.apps.googleusercontent.com"
-
-SECRET_KEY = "05344ffa81ac1adad640701221700b92a48f43a7984b4d40f97ca64a29021c14"
-ALGORITHM = "HS256"
+env_path = Path(".") / ".env"
+load_dotenv(env_path)
 
 local_file = open("matches-dawd2.json")
-
 all_events = Events(json.load(local_file))
 
 base_info = BaseInfo()
@@ -33,12 +30,6 @@ matches_they_liked = []
 all_likes = []
 all_chats = []
 
-
-class Token(BaseModel):
-    id_token: str
-
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 app = FastAPI()
@@ -60,7 +51,7 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, os.getenv("SECRET_KEY"), algorithms=[os.getenv("ALGORITHM")])
         username: str = payload.get("user_id")
         if username is None:
             raise credentials_exception
@@ -83,19 +74,20 @@ def get_like_content(content: List):
 
 
 def save_hinge_data(events: Events, user_id: str, session: Session):
-    timestamp_format = "%Y-%m-%d %H:%M:%S.%f"
     for evt in events.root:
         if evt.get('match') and evt.get("like"):
             # I liked them and got a match
-            event_timestamp = dateparser.parse(evt.get("match")[0]["timestamp"])
+            event_timestamp = parse_timestamp(evt.get("match")[0])
             db_match = Matches(user_id=user_id, type=1, timestamp=event_timestamp)
             session.add(db_match)
         elif evt.get('match'):
-            event_timestamp = dateparser.parse(evt.get("match")[0]["timestamp"])
+            # They liked me and matched
+            event_timestamp = parse_timestamp(evt.get("match")[0])
             db_match = Matches(user_id=user_id, type=2, timestamp=event_timestamp)
             session.add(db_match)
         elif evt.get("like"):
-            event_timestamp = dateparser.parse(evt.get("like")[0]["timestamp"])
+            # All likes
+            event_timestamp = parse_timestamp(evt.get("like")[0])
             db_like = Likes(user_id=user_id, type=get_like_content(evt.get("like")), timestamp=event_timestamp)
             session.add(db_like)
 
@@ -136,7 +128,7 @@ def per_month(data: List):
 print("From Oct 19 to Jan 23")
 print("Matches: {}".format(len(all_matches)), "Likes: {}".format(len(all_likes)),
       "Percentage: {}%".format(math.ceil(len(all_matches) / len(all_likes) * 100)))
-print("Total conversations: {}".format(base_info.total_chat_count))
+# print("Total conversations: {}".format(base_info.total_chat_count))
 print("Likes per day: {}".format(per_day(all_likes)))
 print("Matches per day: {}".format(per_day(all_matches)))
 print("Matches where they liked me: {}".format(len(matches_they_liked)))
@@ -153,15 +145,19 @@ def on_startup(session: Session = Depends(get_session)):
 @app.post("/token")
 async def login_for_access_token(token: Token, response: Response):
     try:
-        idinfo = id_token.verify_oauth2_token(token.id_token, requests.Request(), GOOGLE_CLIENT_ID)
+        id_info = id_token.verify_oauth2_token(
+            token.id_token,
+            requests.Request(),
+            os.getenv("GOOGLE_CLIENT_ID")
+        )
 
         user_details = {
-            "user_id": idinfo["sub"],
-            "email": idinfo["email"],
-            "name": idinfo["given_name"],
-            "picture": idinfo["picture"]
+            "user_id": id_info["sub"],
+            "email": id_info["email"],
+            "name": id_info["given_name"],
+            "picture": id_info["picture"]
         }
-        token = jwt.encode(user_details, SECRET_KEY, algorithm=ALGORITHM)
+        token = jwt.encode(user_details, os.getenv("SECRET_KEY"), algorithm=os.getenv("ALGORITHM"))
         return {"status": "success", "token": token}
     except ValueError as error:
         # Invalid ID token
@@ -195,20 +191,41 @@ async def create_upload_file(file: UploadFile, user_data: GetUserDep, session: S
 
 @app.get("/api/v1/matches", response_model=List[Matches])
 async def read_matches(user_data: GetUserDep, session: Session = Depends(get_session)):
-    statement = select(Matches).where(Matches.user_id == user_data.get("email"))
+    statement = (select(Matches)
+                 .where(Matches.user_id == user_data.get("email"))
+                 .order_by(Matches.timestamp))
     matches = session.exec(statement)
     if not matches:
-        raise HTTPException(status_code=404, detail="Match not found")
+        raise HTTPException(status_code=404, detail="Matches not found for that user")
     return matches
 
 
 @app.get("/api/v1/likes", response_model=List[Likes])
 async def read_likes(user_data: GetUserDep, session: Session = Depends(get_session)):
-    statement = select(Likes).where(Likes.user_id == user_data.get("email"))
+    statement = (select(Likes)
+                 .where(Likes.user_id == user_data.get("email"))
+                 .order_by(Matches.timestamp))
     likes = session.exec(statement)
     if not likes:
         raise HTTPException(status_code=404, detail="Likes not found for that user")
     return likes
+
+
+@app.get("/api/v1/stats", response_model=BaseInfo)
+async def read_stats(user_data: GetUserDep, session: Session = Depends(get_session)):
+    matches_statement = (select(Matches)
+                         .where(Matches.user_id == user_data.get("email"))
+                         .order_by(Matches.timestamp))
+    likes_statement = (select(Likes)
+                       .where(Likes.user_id == user_data.get("email"))
+                       .order_by(Likes.timestamp))
+
+    matches = len(session.exec(matches_statement).all())
+    likes = len(session.exec(likes_statement).all())
+
+    stats = BaseInfo(match_count=matches, like_count=likes)
+
+    return stats
 
 
 @app.get("/api/v1/base")

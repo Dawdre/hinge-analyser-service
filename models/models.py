@@ -1,9 +1,9 @@
+from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from pydantic import RootModel, BaseModel
-from sqlmodel import Field, Session, SQLModel, create_engine, select
-from datetime import datetime
+from sqlmodel import Field, SQLModel
 
 
 class MatchType(Enum):
@@ -37,6 +37,10 @@ class Events(RootModel):
         return self.root[item]
 
 
+class Token(BaseModel):
+    id_token: str
+
+
 class EventTimeStamp(BaseModel):
     timestamp: str
 
@@ -61,7 +65,5 @@ class Block(EventTimeStamp):
 
 
 class BaseInfo(BaseModel):
-    user_id: str | None = None
     match_count: int | None = None
     like_count: int | None = None
-    total_chat_count: int | None = None

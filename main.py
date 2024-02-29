@@ -6,6 +6,7 @@ from typing import List, Annotated
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.security import OAuth2PasswordBearer
 from google.auth.transport import requests
 from google.oauth2 import id_token
@@ -14,21 +15,15 @@ from sqlmodel import Session, select
 from starlette.middleware.cors import CORSMiddleware
 
 from db.session import create_db_and_tables, get_session
-from models.models import Events, Like, BaseInfo, Matches, Likes, Token
-from utils.dates import parse_timestamp
+from models.models import Events, HingeStats, Matches, Likes, Token, HingeStatsLikes
+from utils.dates import parse_timestamp, get_date_ranges
 
 env_path = Path(".") / ".env"
 load_dotenv(env_path)
 
 local_file = open("matches-dawd2.json")
 all_events = Events(json.load(local_file))
-
-base_info = BaseInfo()
-all_matches = []
-matches_i_liked = []
-matches_they_liked = []
-all_likes = []
-all_chats = []
+upload_date_range = get_date_ranges(all_events)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -94,46 +89,6 @@ def save_hinge_data(events: Events, user_id: str, session: Session):
     session.commit()
 
 
-for event in all_events.root:
-    # match = Match(**event.get('match')[0])
-    # all_matches.append(match)
-    # base_info.match_count = len(all_matches)
-    if event.get('match') and event.get("like"):
-        # I liked them and got a match
-        matches_i_liked.append(event)
-    elif event.get('match'):
-        # They liked me and matched
-        matches_they_liked.append(event)
-    elif event.get("like"):
-        like = Like(**event.get("like")[0])
-        all_likes.append(like)
-        base_info.like_count = len(all_likes)
-
-    # for key, item in event.items():
-    #     if key == "chats":
-    #         chats = [Chats(**x) for x in item]
-    #         if len(chats) > 1:
-    #             all_chats.append(chats)
-    #         base_info.total_chat_count = len(all_chats)
-
-
-def per_day(data: List):
-    return round((len(data) / 4) / 365, 2)
-
-
-def per_month(data: List):
-    return round((len(data) / 4) / 12, 2)
-
-
-print("From Oct 19 to Jan 23")
-print("Matches: {}".format(len(all_matches)), "Likes: {}".format(len(all_likes)),
-      "Percentage: {}%".format(math.ceil(len(all_matches) / len(all_likes) * 100)))
-# print("Total conversations: {}".format(base_info.total_chat_count))
-print("Likes per day: {}".format(per_day(all_likes)))
-print("Matches per day: {}".format(per_day(all_matches)))
-print("Matches where they liked me: {}".format(len(matches_they_liked)))
-print("Matches where I liked them: {}".format(len(matches_i_liked)))
-
 GetUserDep = Annotated[dict, Depends(get_current_user)]
 
 
@@ -166,26 +121,21 @@ async def login_for_access_token(token: Token, response: Response):
 
 @app.post("/api/v1/upload")
 async def create_upload_file(file: UploadFile, user_data: GetUserDep, session: Session = Depends(get_session)):
-    path = './uploads'
-
-    # check whether directory already exists
-    if not os.path.exists(path):
-        os.mkdir(path)
-        print("Folder %s created!" % path)
-    else:
-        print("Folder %s already exists" % path)
-
-    file_dir_name = "{}/{}".format(path, file.filename)
-    f = open(file_dir_name, "wb")
     content = await file.read(file.size)
-    f.write(content)
-    f.close()
 
-    events = Events(json.load(open(file_dir_name)))
+    try:
+        content_json = jsonable_encoder(content)
+    except ValueError:
+        raise HTTPException(status_code=422,
+                            detail="Unable to process file contents. Upload a valid 'matches' JSON file.")
+
+    events = Events(json.loads(content_json))
     save_hinge_data(events, user_data.get("email"), session)
+
     return {
         "file_size": file.size,
-        "file_name": file.filename
+        "file_name": file.filename,
+        "hinge_date_range": get_date_ranges(events)
     }
 
 
@@ -204,15 +154,16 @@ async def read_matches(user_data: GetUserDep, session: Session = Depends(get_ses
 async def read_likes(user_data: GetUserDep, session: Session = Depends(get_session)):
     statement = (select(Likes)
                  .where(Likes.user_id == user_data.get("email"))
-                 .order_by(Matches.timestamp))
+                 .order_by(Likes.timestamp))
     likes = session.exec(statement)
     if not likes:
         raise HTTPException(status_code=404, detail="Likes not found for that user")
     return likes
 
 
-@app.get("/api/v1/stats", response_model=BaseInfo)
+@app.get("/api/v1/stats", response_model=HingeStats)
 async def read_stats(user_data: GetUserDep, session: Session = Depends(get_session)):
+    # statements
     matches_statement = (select(Matches)
                          .where(Matches.user_id == user_data.get("email"))
                          .order_by(Matches.timestamp))
@@ -220,10 +171,42 @@ async def read_stats(user_data: GetUserDep, session: Session = Depends(get_sessi
                        .where(Likes.user_id == user_data.get("email"))
                        .order_by(Likes.timestamp))
 
+    they_liked_me_statement = (select(Likes)
+                               .where(Likes.user_id == user_data.get("email"))
+                               .where(Likes.type == 2)
+                               .order_by(Likes.timestamp))
+    i_liked_them_statement = (select(Likes)
+                              .where(Likes.user_id == user_data.get("email"))
+                              .where(Likes.type == 1)
+                              .order_by(Likes.timestamp))
+
+    # execute
     matches = len(session.exec(matches_statement).all())
     likes = len(session.exec(likes_statement).all())
+    they_liked_me_likes = session.exec(they_liked_me_statement).all()
+    i_liked_them_likes = session.exec(i_liked_them_statement).all()
 
-    stats = BaseInfo(match_count=matches, like_count=likes)
+    like_days_delta = (they_liked_me_likes[-1].timestamp - they_liked_me_likes[0].timestamp).days
+    likes_per_day = {
+        "date_range": upload_date_range,
+        "likes": round(len(they_liked_me_likes) / like_days_delta, 2)
+    }
+    likes_stats = HingeStatsLikes(
+        total_like_count=likes,
+        they_liked_me_count=len(they_liked_me_likes),
+        i_liked_them_count=len(i_liked_them_likes),
+        likes_received_per_day_for_given_range=likes_per_day
+    )
+
+    stats = HingeStats(
+        match_count=matches,
+        likes=likes_stats,
+        event_date_range=upload_date_range,
+        conversion_percentage={
+            "percentage": math.ceil((matches / likes) * 100),
+            "description": "How many matches converted from total likes"
+        }
+    )
 
     return stats
 

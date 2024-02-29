@@ -64,6 +64,20 @@ class Block(EventTimeStamp):
     type: str = MatchType.BLOCK.value
 
 
-class BaseInfo(BaseModel):
+class LikesReceivedPerDayForGivenRange(BaseModel):
+    date_range: dict | None = None
+    likes: float | None = None
+
+
+class HingeStatsLikes(BaseModel):
+    total_like_count: int | None = None
+    they_liked_me_count: int | None = None
+    i_liked_them_count: int | None = None
+    likes_received_per_day_for_given_range: LikesReceivedPerDayForGivenRange | None = None
+
+
+class HingeStats(BaseModel):
     match_count: int | None = None
-    like_count: int | None = None
+    likes: HingeStatsLikes | None = None
+    event_date_range: dict | None = None
+    conversion_percentage: dict | None = None

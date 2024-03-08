@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import RootModel, BaseModel
 from sqlmodel import Field, SQLModel
@@ -11,6 +11,25 @@ class MatchType(Enum):
     MATCH = "match"
     CHATS = "chats"
     BLOCK = "block"
+
+
+class WhoLiked(Enum):
+    THEM = "Them"
+    YOU = "You"
+
+
+class Person(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    matched: Optional[bool] = None
+    who_liked: str | None = None
+    what_you_liked: Optional[str] = None
+    photo_url: Optional[str] = None
+    like_timestamp: Optional[datetime] = None
+    match_timestamp: Optional[datetime] = None
+    we_met: Optional[bool] = None
+    blocked: Optional[str] = None
+    # name_found: Optional[bool] = None
+    # ghosted: bool | None = None
 
 
 class Matches(SQLModel, table=True):
@@ -64,20 +83,31 @@ class Block(EventTimeStamp):
     type: str = MatchType.BLOCK.value
 
 
+class MatchesPerDayForGivenRange(BaseModel):
+    date_range: dict | None = None
+    matches: float | None = None
+
+
+class HingeStatsMatches(BaseModel):
+    total_match_count: int | None = None
+    they_liked_matched_count: int | None = None
+    i_liked_matched_count: int | None = None
+    matches_per_day_for_given_range: MatchesPerDayForGivenRange | None = None
+
+
 class LikesReceivedPerDayForGivenRange(BaseModel):
     date_range: dict | None = None
     likes: float | None = None
 
 
 class HingeStatsLikes(BaseModel):
+    description: str | None = None
     total_like_count: int | None = None
-    they_liked_me_count: int | None = None
-    i_liked_them_count: int | None = None
     likes_received_per_day_for_given_range: LikesReceivedPerDayForGivenRange | None = None
 
 
 class HingeStats(BaseModel):
-    match_count: int | None = None
+    matches: HingeStatsMatches | None = None
     likes: HingeStatsLikes | None = None
     event_date_range: dict | None = None
     conversion_percentage: dict | None = None

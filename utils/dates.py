@@ -7,6 +7,10 @@ def parse_timestamp(event: dict):
     return dateparser.parse(event["timestamp"])
 
 
+def calc_per_day(arr):
+    return round(len(arr) / (arr[-1].timestamp - arr[0].timestamp).days, 2)
+
+
 def get_chat_timestamps(events: Events):
     def find_timestamp(e: dict):
         if e.get("chats"):

@@ -15,8 +15,10 @@ from sqlmodel import Session, select
 from starlette.middleware.cors import CORSMiddleware
 
 from db.session import create_db_and_tables, get_session
-from models.models import Events, HingeStats, Matches, Likes, Token, HingeStatsLikes
-from utils.dates import parse_timestamp, get_date_ranges
+from db.statements import check_existing_and_delete
+from models.models import Events, HingeStats, Matches, Likes, Token, HingeStatsLikes, HingeStatsMatches, Person, \
+    WhoLiked
+from utils.dates import parse_timestamp, get_date_ranges, calc_per_day
 
 env_path = Path(".") / ".env"
 load_dotenv(env_path)
@@ -68,7 +70,73 @@ def get_like_content(content: List):
     return 0
 
 
+def save_person_data(events: Events, session: Session):
+    for event in events.root:
+        db_person = Person()
+        if (event.get("match")
+                and event.get("like")
+                and event.get("chats")
+                and event.get("we_met")):
+
+            db_person.matched = True
+            db_person.who_liked = WhoLiked.YOU.value
+            db_person.match_timestamp = parse_timestamp(event.get("match")[0])
+            db_person.like_timestamp = parse_timestamp(event.get("like")[0])
+            # https://flairnlp.github.io/docs/tutorial-basics/tagging-entities
+            # db_person.blocked = event.get("block")[0]["block_type"]
+
+            if event.get("we_met")[0]["did_meet_subject"] == "Yes":
+                db_person.we_met = True
+            else:
+                db_person.we_met = False
+        elif event.get("match") and event.get("like"):
+            db_person.matched = True
+            db_person.who_liked = WhoLiked.YOU.value
+            db_person.match_timestamp = parse_timestamp(event.get("match")[0])
+            db_person.like_timestamp = parse_timestamp(event.get("like")[0])
+
+            if get_like_content(event.get("like")) == 1:
+                db_person.what_you_liked = "photo"
+                like_stuff = json.loads(event.get("like")[0]["content"])[0]
+                db_person.photo_url = like_stuff.get("photo").get("url")
+            elif get_like_content(event.get("like")) == 2:
+                db_person.what_you_liked = "prompt"
+            else:
+                db_person.what_you_liked = "video"
+
+        elif event.get("match") and event.get("chats"):
+            db_person.matched = True
+            db_person.who_liked = WhoLiked.THEM.value
+            db_person.match_timestamp = parse_timestamp(event.get("match")[0])
+
+        elif event.get("like"):
+            db_person.matched = False
+            db_person.who_liked = WhoLiked.YOU.value
+            db_person.like_timestamp = parse_timestamp(event.get("like")[0])
+
+            if get_like_content(event.get("like")) == 1:
+                db_person.what_you_liked = "photo"
+                like_stuff = json.loads(event.get("like")[0]["content"])[0]
+                db_person.photo_url = like_stuff.get("photo").get("url")
+            elif get_like_content(event.get("like")) == 2:
+                db_person.what_you_liked = "prompt"
+            else:
+                db_person.what_you_liked = "video"
+
+        elif event.get("match") or event.get("block"):
+            continue
+            # db_person.matched = True
+            # db_person.match_timestamp = parse_timestamp(event.get("match")[0])
+            # db_person.who_liked = WhoLiked.THEM.value
+
+        session.add(db_person)
+
+    session.commit()
+
+
 def save_hinge_data(events: Events, user_id: str, session: Session):
+    check_existing_and_delete(user_id, session)
+
     for evt in events.root:
         if evt.get('match') and evt.get("like"):
             # I liked them and got a match
@@ -131,6 +199,7 @@ async def create_upload_file(file: UploadFile, user_data: GetUserDep, session: S
 
     events = Events(json.loads(content_json))
     save_hinge_data(events, user_data.get("email"), session)
+    save_person_data(events, session)
 
     return {
         "file_size": file.size,
@@ -171,39 +240,50 @@ async def read_stats(user_data: GetUserDep, session: Session = Depends(get_sessi
                        .where(Likes.user_id == user_data.get("email"))
                        .order_by(Likes.timestamp))
 
-    they_liked_me_statement = (select(Likes)
-                               .where(Likes.user_id == user_data.get("email"))
-                               .where(Likes.type == 2)
-                               .order_by(Likes.timestamp))
-    i_liked_them_statement = (select(Likes)
-                              .where(Likes.user_id == user_data.get("email"))
-                              .where(Likes.type == 1)
-                              .order_by(Likes.timestamp))
+    they_liked_me_statement = (select(Matches)
+                               .where(Matches.user_id == user_data.get("email"))
+                               .where(Matches.type == 2)
+                               .order_by(Matches.timestamp))
+    i_liked_them_statement = (select(Matches)
+                              .where(Matches.user_id == user_data.get("email"))
+                              .where(Matches.type == 1)
+                              .order_by(Matches.timestamp))
 
     # execute
-    matches = len(session.exec(matches_statement).all())
-    likes = len(session.exec(likes_statement).all())
-    they_liked_me_likes = session.exec(they_liked_me_statement).all()
-    i_liked_them_likes = session.exec(i_liked_them_statement).all()
+    matches = session.exec(matches_statement).all()
+    likes = session.exec(likes_statement).all()
+    they_liked_me = session.exec(they_liked_me_statement).all()
+    i_liked_them = session.exec(i_liked_them_statement).all()
 
-    like_days_delta = (they_liked_me_likes[-1].timestamp - they_liked_me_likes[0].timestamp).days
+    matches_per_day = {
+        "date_range": upload_date_range,
+        "matches": calc_per_day(matches)
+    }
+    matches_stats = HingeStatsMatches(
+        total_match_count=len(matches),
+        they_liked_matched_count=len(they_liked_me),
+        i_liked_matched_count=len(i_liked_them),
+        matches_per_day_for_given_range=matches_per_day
+    )
+
     likes_per_day = {
         "date_range": upload_date_range,
-        "likes": round(len(they_liked_me_likes) / like_days_delta, 2)
+        "likes": calc_per_day(they_liked_me)
     }
     likes_stats = HingeStatsLikes(
-        total_like_count=likes,
-        they_liked_me_count=len(they_liked_me_likes),
-        i_liked_them_count=len(i_liked_them_likes),
+        description="Likes given and received. "
+                    "There is no way of knowing whether "
+                    "you liked someone or they liked you, unless there was a match involved.",
+        total_like_count=len(likes),
         likes_received_per_day_for_given_range=likes_per_day
     )
 
     stats = HingeStats(
-        match_count=matches,
+        matches=matches_stats,
         likes=likes_stats,
         event_date_range=upload_date_range,
         conversion_percentage={
-            "percentage": math.ceil((matches / likes) * 100),
+            "percentage": math.ceil((len(matches) / len(likes)) * 100),
             "description": "How many matches converted from total likes"
         }
     )

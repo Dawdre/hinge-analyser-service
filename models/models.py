@@ -18,8 +18,16 @@ class WhoLiked(Enum):
     YOU = "You"
 
 
+class UserMetaData(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
+    start_range_timestamp: Optional[datetime] = None
+    end_range_timestamp: Optional[datetime] = None
+
+
 class Person(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
     matched: Optional[bool] = None
     who_liked: str | None = None
     what_you_liked: Optional[str] = None
@@ -28,7 +36,7 @@ class Person(SQLModel, table=True):
     match_timestamp: Optional[datetime] = None
     we_met: Optional[bool] = None
     blocked: Optional[str] = None
-    # name_found: Optional[bool] = None
+    # name_found: Optional[str] = None
     # ghosted: bool | None = None
 
 

@@ -1,4 +1,5 @@
 import json
+import json
 import math
 import os
 from pathlib import Path
@@ -17,14 +18,29 @@ from starlette.middleware.cors import CORSMiddleware
 from db.session import create_db_and_tables, get_session
 from db.statements import check_existing_and_delete
 from models.models import Events, HingeStats, Matches, Likes, Token, HingeStatsLikes, HingeStatsMatches, Person, \
-    WhoLiked
+    WhoLiked, UserMetaData
+from nlp.train_names import load_or_create_ner
 from utils.dates import parse_timestamp, get_date_ranges, calc_per_day
+
+load_or_create_ner()
 
 env_path = Path(".") / ".env"
 load_dotenv(env_path)
 
 local_file = open("matches-dawd2.json")
 all_events = Events(json.load(local_file))
+
+# for evt in all_events.root:
+#     if (evt.get("match")
+#             and evt.get("like")
+#             and evt.get("chats")):
+#         for chat in evt.get("chats"):
+#             if chat.get("body"):
+#                 doc1 = nlp(chat.get("body"))
+#                 for blah in doc1.ents:
+#                     if blah.label_ == "PERSON":
+#                         print(blah.text)
+
 upload_date_range = get_date_ranges(all_events)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -70,9 +86,9 @@ def get_like_content(content: List):
     return 0
 
 
-def save_person_data(events: Events, session: Session):
+def save_person_data(events: Events, user_id: str, session: Session):
     for event in events.root:
-        db_person = Person()
+        db_person = Person(user_id=user_id)
         if (event.get("match")
                 and event.get("like")
                 and event.get("chats")
@@ -82,8 +98,11 @@ def save_person_data(events: Events, session: Session):
             db_person.who_liked = WhoLiked.YOU.value
             db_person.match_timestamp = parse_timestamp(event.get("match")[0])
             db_person.like_timestamp = parse_timestamp(event.get("like")[0])
-            # https://flairnlp.github.io/docs/tutorial-basics/tagging-entities
-            # db_person.blocked = event.get("block")[0]["block_type"]
+
+            for chat in event.get("chats"):
+                doc1 = nlp(chat.get("body"))
+                for blah in doc1.ents:
+                    print(blah.text, blah.label_)
 
             if event.get("we_met")[0]["did_meet_subject"] == "Yes":
                 db_person.we_met = True
@@ -198,13 +217,20 @@ async def create_upload_file(file: UploadFile, user_data: GetUserDep, session: S
                             detail="Unable to process file contents. Upload a valid 'matches' JSON file.")
 
     events = Events(json.loads(content_json))
+
+    date_range = get_date_ranges(events)
+    db_user_metadata = UserMetaData(user_id=user_data.get("email"),
+                                    start_range_timestamp=date_range["start_date"],
+                                    end_range_timestamp=date_range["end_date"])
+    session.add(db_user_metadata)
+    session.commit()
+
     save_hinge_data(events, user_data.get("email"), session)
-    save_person_data(events, session)
+    save_person_data(events, user_data.get("email"), session)
 
     return {
         "file_size": file.size,
         "file_name": file.filename,
-        "hinge_date_range": get_date_ranges(events)
     }
 
 
@@ -228,6 +254,17 @@ async def read_likes(user_data: GetUserDep, session: Session = Depends(get_sessi
     if not likes:
         raise HTTPException(status_code=404, detail="Likes not found for that user")
     return likes
+
+
+@app.get("/api/v1/person", response_model=List[Person])
+async def read_person(user_data: GetUserDep, session: Session = Depends(get_session)):
+    statement = select(Person).where(Person.user_id == user_data.get("email"))
+
+    all_persons = session.exec(statement)
+
+    if not all_persons:
+        raise HTTPException(status_code=404, detail="Persons not found for that user")
+    return all_persons
 
 
 @app.get("/api/v1/stats", response_model=HingeStats)

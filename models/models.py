@@ -26,16 +26,18 @@ class UserMetaData(SQLModel, table=True):
 
 
 class Person(SQLModel, table=True):
-    id: int = Field(default=None, primary_key=True)
-    user_id: str = Field(index=True)
-    matched: Optional[bool] = None
-    who_liked: str | None = None
-    what_you_liked: Optional[str] = None
-    photo_url: Optional[str] = None
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: Optional[str] = Field(index=True)
+    matched: Optional[bool] = Field(None)
+    who_liked: Optional[str] = None
+    what_you_liked_photo: Optional[str] = None
+    what_you_liked_prompt: Optional[str] = None
+    what_you_liked_video: Optional[str] = None
     like_timestamp: Optional[datetime] = None
     match_timestamp: Optional[datetime] = None
     we_met: Optional[bool] = None
     blocked: Optional[str] = None
+    has_media: Optional[bool] = None
     # name_found: Optional[str] = None
     # ghosted: bool | None = None
 
@@ -44,7 +46,7 @@ class Matches(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
     user_id: str = Field(index=True)
     type: int = Field(index=True)
-    timestamp: datetime
+    timestamp: Optional[datetime] = Field(None)
 
 
 class Likes(SQLModel, table=True):

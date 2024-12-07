@@ -1,10 +1,14 @@
-import json
+import base64
+import io
 import json
 import math
 import os
 from pathlib import Path
 from typing import List, Annotated
 
+import httpx
+import uvicorn
+from PIL import Image
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -12,23 +16,28 @@ from fastapi.security import OAuth2PasswordBearer
 from google.auth.transport import requests
 from google.oauth2 import id_token
 from jose import jwt, JWTError
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete, desc
 from starlette.middleware.cors import CORSMiddleware
 
 from db.session import create_db_and_tables, get_session
-from db.statements import check_existing_and_delete
+from db.writes.matches_likes import save_hinge_data
+from db.writes.person import save_person_data
+from images.thumbnails import resize_with_aspect_ratio
+from models.image import ImageUrls, ThumbNailResponse
 from models.models import Events, HingeStats, Matches, Likes, Token, HingeStatsLikes, HingeStatsMatches, Person, \
-    WhoLiked, UserMetaData
-from nlp.train_names import load_or_create_ner
-from utils.dates import parse_timestamp, get_date_ranges, calc_per_day
+    UserMetaData, MatchesPerDayForGivenRange, LikesReceivedPerDayForGivenRange
+from utils.dates import get_date_ranges, calc_per_day
 
-load_or_create_ner()
+# load_or_create_ner()
 
+# load env variables
 env_path = Path(".") / ".env"
 load_dotenv(env_path)
 
+# TODO: remove this
 local_file = open("matches-dawd2.json")
 all_events = Events(json.load(local_file))
+upload_date_range = get_date_ranges(all_events)
 
 # for evt in all_events.root:
 #     if (evt.get("match")
@@ -41,23 +50,28 @@ all_events = Events(json.load(local_file))
 #                     if blah.label_ == "PERSON":
 #                         print(blah.text)
 
-upload_date_range = get_date_ranges(all_events)
-
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+# Create app
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['http://localhost:5173', 'http://127.0.0.1:5173',
                    'https://localhost:5173', 'https://127.0.0.1:5173'],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE", "PUT"],
     allow_headers=["*"],
 
 )
 
 
 async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
+    """
+    Verifies the given Bearer token and returns the associated user_id.
+
+    :param token: The Bearer token to verify.
+    :return: The user_id associated with the given token, or raises an HTTPException if the token is invalid.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid authentication credentials",
@@ -71,109 +85,6 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     except JWTError:
         raise credentials_exception
     return payload
-
-
-def get_like_content(content: List):
-    like_stuff = json.loads(content[0]["content"])[0]
-
-    if like_stuff.get("photo") and like_stuff.get("photo").get("url"):
-        return 1
-    elif like_stuff.get("prompt") and like_stuff.get("prompt").get("question"):
-        return 2
-    elif like_stuff.get("video") and like_stuff.get("video").get("url"):
-        return 3
-
-    return 0
-
-
-def save_person_data(events: Events, user_id: str, session: Session):
-    for event in events.root:
-        db_person = Person(user_id=user_id)
-        if (event.get("match")
-                and event.get("like")
-                and event.get("chats")
-                and event.get("we_met")):
-
-            db_person.matched = True
-            db_person.who_liked = WhoLiked.YOU.value
-            db_person.match_timestamp = parse_timestamp(event.get("match")[0])
-            db_person.like_timestamp = parse_timestamp(event.get("like")[0])
-
-            for chat in event.get("chats"):
-                doc1 = nlp(chat.get("body"))
-                for blah in doc1.ents:
-                    print(blah.text, blah.label_)
-
-            if event.get("we_met")[0]["did_meet_subject"] == "Yes":
-                db_person.we_met = True
-            else:
-                db_person.we_met = False
-        elif event.get("match") and event.get("like"):
-            db_person.matched = True
-            db_person.who_liked = WhoLiked.YOU.value
-            db_person.match_timestamp = parse_timestamp(event.get("match")[0])
-            db_person.like_timestamp = parse_timestamp(event.get("like")[0])
-
-            if get_like_content(event.get("like")) == 1:
-                db_person.what_you_liked = "photo"
-                like_stuff = json.loads(event.get("like")[0]["content"])[0]
-                db_person.photo_url = like_stuff.get("photo").get("url")
-            elif get_like_content(event.get("like")) == 2:
-                db_person.what_you_liked = "prompt"
-            else:
-                db_person.what_you_liked = "video"
-
-        elif event.get("match") and event.get("chats"):
-            db_person.matched = True
-            db_person.who_liked = WhoLiked.THEM.value
-            db_person.match_timestamp = parse_timestamp(event.get("match")[0])
-
-        elif event.get("like"):
-            db_person.matched = False
-            db_person.who_liked = WhoLiked.YOU.value
-            db_person.like_timestamp = parse_timestamp(event.get("like")[0])
-
-            if get_like_content(event.get("like")) == 1:
-                db_person.what_you_liked = "photo"
-                like_stuff = json.loads(event.get("like")[0]["content"])[0]
-                db_person.photo_url = like_stuff.get("photo").get("url")
-            elif get_like_content(event.get("like")) == 2:
-                db_person.what_you_liked = "prompt"
-            else:
-                db_person.what_you_liked = "video"
-
-        elif event.get("match") or event.get("block"):
-            continue
-            # db_person.matched = True
-            # db_person.match_timestamp = parse_timestamp(event.get("match")[0])
-            # db_person.who_liked = WhoLiked.THEM.value
-
-        session.add(db_person)
-
-    session.commit()
-
-
-def save_hinge_data(events: Events, user_id: str, session: Session):
-    check_existing_and_delete(user_id, session)
-
-    for evt in events.root:
-        if evt.get('match') and evt.get("like"):
-            # I liked them and got a match
-            event_timestamp = parse_timestamp(evt.get("match")[0])
-            db_match = Matches(user_id=user_id, type=1, timestamp=event_timestamp)
-            session.add(db_match)
-        elif evt.get('match'):
-            # They liked me and matched
-            event_timestamp = parse_timestamp(evt.get("match")[0])
-            db_match = Matches(user_id=user_id, type=2, timestamp=event_timestamp)
-            session.add(db_match)
-        elif evt.get("like"):
-            # All likes
-            event_timestamp = parse_timestamp(evt.get("like")[0])
-            db_like = Likes(user_id=user_id, type=get_like_content(evt.get("like")), timestamp=event_timestamp)
-            session.add(db_like)
-
-    session.commit()
 
 
 GetUserDep = Annotated[dict, Depends(get_current_user)]
@@ -204,6 +115,56 @@ async def login_for_access_token(token: Token, response: Response):
     except ValueError as error:
         # Invalid ID token
         return {"status": "error", "message": str(error)}
+
+
+@app.delete("/api/v1/delete-all")
+async def delete_table_data(user_data: GetUserDep, session: Session = Depends(get_session)):
+    # dev endpoint to delete all table data
+    session.exec(delete(Likes))
+    session.exec(delete(Person))
+    session.exec(delete(Matches))
+    session.exec(delete(UserMetaData))
+
+    session.commit()
+
+
+@app.post("/api/v1/generate-thumbnails")
+async def generate_thumbnails(image_urls: ImageUrls):
+    thumbnails = []
+
+    def make_base64(source, mime_type):
+        return f"data:{mime_type};base64,{source}"
+
+    async with httpx.AsyncClient() as client:
+        for url in image_urls.urls:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+
+                image = Image.open(io.BytesIO(response.content))
+
+                thumbnail = image.copy()
+                thumbnail = resize_with_aspect_ratio(thumbnail)
+
+                thumbnail_io = io.BytesIO()
+                thumbnail.save(thumbnail_io, format=image.format)
+                thumbnail_io.seek(0)
+
+                thumbnails.append({
+                    "original_url": url,
+                    "base64": make_base64(
+                        base64.b64encode(thumbnail_io.read()).decode('utf-8'),
+                        f"image/{image.format.lower()}"
+                    ),
+                    "size": thumbnail.size
+                })
+            except httpx.HTTPError as e:
+                thumbnails.append({
+                    "original_url": url,
+                    "image_error": str(e)
+                })
+
+    return thumbnails
 
 
 @app.post("/api/v1/upload")
@@ -256,15 +217,48 @@ async def read_likes(user_data: GetUserDep, session: Session = Depends(get_sessi
     return likes
 
 
-@app.get("/api/v1/person", response_model=List[Person])
-async def read_person(user_data: GetUserDep, session: Session = Depends(get_session)):
-    statement = select(Person).where(Person.user_id == user_data.get("email"))
+@app.get("/api/v1/persons")
+async def read_person(page: int, user_data: GetUserDep, session: Session = Depends(get_session)):
+    # SELECT * FROM person
+    # WHERE like_timestamp IS NOT NULL
+    # OR match_timestamp IS NOT NULL
+    # ORDER BY has_media DESC, like_timestamp DESC, match_timestamp DESC;
+    statement = (
+        select(Person)
+        .where(Person.user_id == user_data.get("email"))
+        .where(Person.like_timestamp is not None or Person.match_timestamp is not None)
+        .order_by(desc(Person.has_media), desc(Person.like_timestamp), desc(Person.match_timestamp))
+    )
 
-    all_persons = session.exec(statement)
+    list_of_persons = list(session.exec(statement).all())
 
-    if not all_persons:
+    # Pagination
+    page_size = 10
+    page_count = math.ceil(len(list_of_persons) / page_size)
+    page = min(page, page_count)
+
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+
+    list_of_persons = list_of_persons[start_index:end_index]
+
+    # Go and get original image and generate thumbnails
+    generate_thumbnails_response = await generate_thumbnails(
+        ImageUrls(
+            urls=[person.what_you_liked_photo for person in list_of_persons if person.what_you_liked_photo is not None])
+    )
+
+    # Add the generated thumbnails to the person object
+    for person, thumb in zip(list_of_persons, generate_thumbnails_response):
+        person.what_you_liked_photo = ThumbNailResponse(**thumb)
+
+    if not list_of_persons:
         raise HTTPException(status_code=404, detail="Persons not found for that user")
-    return all_persons
+    return {
+        "persons": list_of_persons,
+        "current_page": page,
+        "page_count": page_count
+    }
 
 
 @app.get("/api/v1/stats", response_model=HingeStats)
@@ -292,10 +286,10 @@ async def read_stats(user_data: GetUserDep, session: Session = Depends(get_sessi
     they_liked_me = session.exec(they_liked_me_statement).all()
     i_liked_them = session.exec(i_liked_them_statement).all()
 
-    matches_per_day = {
-        "date_range": upload_date_range,
-        "matches": calc_per_day(matches)
-    }
+    matches_per_day = MatchesPerDayForGivenRange(
+        date_range=upload_date_range,
+        matches=calc_per_day(matches)
+    )
     matches_stats = HingeStatsMatches(
         total_match_count=len(matches),
         they_liked_matched_count=len(they_liked_me),
@@ -303,14 +297,12 @@ async def read_stats(user_data: GetUserDep, session: Session = Depends(get_sessi
         matches_per_day_for_given_range=matches_per_day
     )
 
-    likes_per_day = {
-        "date_range": upload_date_range,
-        "likes": calc_per_day(they_liked_me)
-    }
+    likes_per_day = LikesReceivedPerDayForGivenRange(
+        date_range=upload_date_range,
+        likes=calc_per_day(likes)
+    )
     likes_stats = HingeStatsLikes(
-        description="Likes given and received. "
-                    "There is no way of knowing whether "
-                    "you liked someone or they liked you, unless there was a match involved.",
+        description="Every like I have sent",
         total_like_count=len(likes),
         likes_received_per_day_for_given_range=likes_per_day
     )
@@ -321,7 +313,7 @@ async def read_stats(user_data: GetUserDep, session: Session = Depends(get_sessi
         event_date_range=upload_date_range,
         conversion_percentage={
             "percentage": math.ceil((len(matches) / len(likes)) * 100),
-            "description": "How many matches converted from total likes"
+            "description": "How many matches converted from total likes I sent"
         }
     )
 
@@ -331,3 +323,7 @@ async def read_stats(user_data: GetUserDep, session: Session = Depends(get_sessi
 @app.get("/api/v1/base")
 async def read_base(user_data: GetUserDep):
     return user_data
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", reload=True)

@@ -1,14 +1,16 @@
-from typing import Optional, List
+from typing import Optional
 
 from pydantic import BaseModel, field_validator
 
 
-class ImageUrls(BaseModel):
-    urls: List[Optional[str]]
+class ImageUrl(BaseModel):
+    url: str
 
-    @field_validator('urls')
+    @field_validator('url')
     def remove_none_urls(cls, v):
-        return [url for url in v if url is not None]
+        if v is None:
+            return None
+        return v
 
 
 class ThumbNailResponse(BaseModel):

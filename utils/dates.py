@@ -30,36 +30,23 @@ def get_chat_timestamps(events: Events):
     return list(filtered_timestamps)
 
 
-def get_timestamps(event_type: str, events: Events):
-    def filter_types(evt: dict):
-        if evt.get("chats"):
-            return False
-        else:
-            return True
+def get_timestamps(events: Events):
+    all_timestamps = []
 
-    all_events_but_chats = filter(
-        lambda e: filter_types(e),
-        events.root
-    )
+    for event in events.root:
+        for key, value in event.data.items():
+            # value is always a single item list
+            first_item = value[0]
 
-    all_timestamps = [
-        parse_timestamp(evt.get(event_type)[0])
-        for evt in all_events_but_chats
-        if evt.get(event_type) is not None
-    ]
+            if isinstance(first_item, dict) and not None:
+                if key in ["match", "like", "block"]:
+                    all_timestamps.append(parse_timestamp(first_item))
 
     return all_timestamps
 
 
 def get_date_ranges(events: Events):
-    all_timestamps = [
-        *get_timestamps("match", events),
-        *get_timestamps("like", events),
-        *get_timestamps("block", events),
-        *get_chat_timestamps(events)
-    ]
-
-    all_timestamps_sorted = sorted(all_timestamps)
+    all_timestamps_sorted = sorted(get_timestamps(events))
 
     date_range = {
         "start_date": all_timestamps_sorted[0],

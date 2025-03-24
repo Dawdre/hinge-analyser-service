@@ -1,6 +1,6 @@
 from sqlmodel import Session, select, delete
 
-from models.models import Matches, Likes, Person
+from models.models import Matches, Likes, Person, UserMetaData
 
 
 def check_existing_and_delete(user_id: str, session: Session):
@@ -13,7 +13,10 @@ def check_existing_and_delete(user_id: str, session: Session):
     persons_statement = select(Person).where(Person.user_id == user_id)
     persons_results = session.exec(persons_statement).first()
 
-    if matches_results and likes_results and persons_results:
+    user_meta_data_statement = select(UserMetaData).where(UserMetaData.user_id == user_id)
+    user_meta_data_results = session.exec(user_meta_data_statement).first()
+
+    if matches_results and likes_results and persons_results and user_meta_data_results:
         delete_statement_matches = delete(Matches).where(Matches.user_id == user_id)
         session.exec(delete_statement_matches)
 
@@ -22,5 +25,8 @@ def check_existing_and_delete(user_id: str, session: Session):
 
         delete_statement_persons = delete(Person).where(Person.user_id == user_id)
         session.exec(delete_statement_persons)
+
+        delete_statement_user_meta_data = delete(UserMetaData).where(UserMetaData.user_id == user_id)
+        session.exec(delete_statement_user_meta_data)
 
         session.commit()

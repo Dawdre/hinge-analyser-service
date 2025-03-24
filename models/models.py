@@ -1,8 +1,9 @@
+import json
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import List, Optional, Any
 
-from pydantic import RootModel, BaseModel
+from pydantic import BaseModel, field_validator
 from sqlmodel import Field, SQLModel
 
 
@@ -21,6 +22,9 @@ class WhoLiked(Enum):
 class UserMetaData(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
     user_id: str = Field(index=True)
+    created_timestamp: Optional[datetime] = Field(None)
+    uuid: Optional[str] = Field()
+    login_timestamp: Optional[datetime] = Field(None)
     start_range_timestamp: Optional[datetime] = None
     end_range_timestamp: Optional[datetime] = None
 
@@ -38,8 +42,16 @@ class Person(SQLModel, table=True):
     we_met: Optional[bool] = None
     blocked: Optional[str] = None
     has_media: Optional[bool] = None
+    thumbnail: Optional[str] = Field()
     # name_found: Optional[str] = None
     # ghosted: bool | None = None
+
+
+class PersonTaskResult(BaseModel):
+    status: str
+    result: str
+    message: str
+    progress: float
 
 
 class Matches(SQLModel, table=True):
@@ -56,14 +68,35 @@ class Likes(SQLModel, table=True):
     timestamp: datetime
 
 
-class Events(RootModel):
-    root: List[Dict[str, List]]
+class FlexibleModel(BaseModel):
+    """
+    A recursive model that can parse nested JSON structures of unknown depth
+    """
+    data: Any = Field(default_factory=dict)
 
-    def __iter__(self):
-        return iter(self.root)
+    @field_validator("data", mode="before")
+    def parse_nested_json(cls, value):
+        return cls.parse_nested(value)
 
-    def __getitem__(self, item):
-        return self.root[item]
+    @staticmethod
+    def parse_nested(value):
+        def recursive_parse(item):
+            if isinstance(item, str):
+                try:
+                    return recursive_parse(json.loads(item))
+                except (json.JSONDecodeError, TypeError):
+                    return item
+            elif isinstance(item, dict):
+                return {k: recursive_parse(v) for k, v in item.items()}
+            elif isinstance(item, list):
+                return [recursive_parse(i) for i in item]
+            return item
+
+        return recursive_parse(value)
+
+
+class Events(BaseModel):
+    root: List[FlexibleModel]
 
 
 class Token(BaseModel):
